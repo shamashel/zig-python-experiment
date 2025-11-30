@@ -25,6 +25,12 @@ pub const MergeRule = struct { left: TokenId, right: TokenId };
 const RuleList = std.ArrayList(MergeRule);
 
 pub const EncoderMetadata = struct { vocab: []const VocabEntry, merges: []const MergeRule };
+pub const EncoderContext = struct {
+    allocator: std.heap.ArenaAllocator,
+    meta: EncoderMetadata,
+};
+
+pub const BlackMagic = ?*anyopaque;
 
 fn read_vocab_file(allocator: std.mem.Allocator, vocab_path: UTF8EncodedStr) !std.json.Parsed(VocabMap) {
     // Read file
@@ -32,8 +38,8 @@ fn read_vocab_file(allocator: std.mem.Allocator, vocab_path: UTF8EncodedStr) !st
     const vocab_file = try cwd.readFileAlloc(allocator, vocab_path, MAX_VOCAB_BYTES);
     defer allocator.free(vocab_file);
 
-    // Parse as JSON
-    return try std.json.parseFromSlice(VocabMap, allocator, vocab_file, .{});
+    // Parse as JSON. Apparently the default is .allocate = .alloc_if_needed, which causes a segfault
+    return try std.json.parseFromSlice(VocabMap, allocator, vocab_file, .{ .allocate = .alloc_always });
 }
 
 /// Parse the provided `vocab.json` file into an array of VocabEntry
@@ -118,11 +124,41 @@ pub fn internal_prepare_encoder(allocator: std.mem.Allocator, vocab_path: UTF8En
     };
 }
 
-// /// Initialize the encoder with the given vocab.
-// /// Wraps the `internal_prepare_encoder` method with an ABI-friendly interface.
-// ///
-// /// Returns 0 on success, non-0 on error.
-// export fn init(vocab_path: UTF8EncodedStrPtr, merges_path: UTF8EncodedStrPtr) c_int {}
+/// Initialize the encoder with the given vocab.
+/// Wraps the `internal_prepare_encoder` method with an ABI-friendly interface.
+///
+/// Returns a pointer to the EncoderContext on success and null otherwise.
+export fn init(vocab_path: UTF8EncodedStrPtr, merges_path: UTF8EncodedStrPtr) BlackMagic {
+    const config = std.heap.page_allocator.create(EncoderContext) catch |err| {
+        std.debug.print("Error while creating EncoderContext: {any}\n", .{err});
+        return null;
+    };
+    config.allocator = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    const alloc = config.allocator.allocator();
+
+    // Also not sure where this should live/how this should work?
+    const meta = internal_prepare_encoder(
+        alloc,
+        std.mem.span(vocab_path),
+        std.mem.span(merges_path),
+    ) catch |err| {
+        std.debug.print("Error while creating encoder: {any}\n", .{err});
+        // Nuke the arena if we fail to create the metadata
+        config.allocator.deinit();
+        std.heap.page_allocator.destroy(config);
+        return null;
+    };
+    config.meta = meta;
+    return config;
+}
+
+export fn deinit(context: BlackMagic) c_int {
+    // How do we get this here?
+    const real_context: *EncoderContext = @ptrCast(@alignCast(context));
+    real_context.allocator.deinit();
+    std.heap.page_allocator.destroy(real_context);
+    return 0;
+}
 
 // /// Encoder method for the tokenizer.
 // ///
@@ -155,18 +191,15 @@ pub fn internal_prepare_encoder(allocator: std.mem.Allocator, vocab_path: UTF8En
 //     }
 // }
 
-test "internal_prepare_encoder loads vocab and merges" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
+test "init loads vocab and merges" {
     // Adjust filenames if yours differ
-    const vocab_path: []const u8 = "vocab.json";
-    const merges_path: []const u8 = "merges.txt";
+    const vocab_path: UTF8EncodedStrPtr = "vocab.json";
+    const merges_path: UTF8EncodedStrPtr = "merges.txt";
 
-    const meta = try internal_prepare_encoder(allocator, vocab_path, merges_path);
-    defer allocator.free(meta.vocab);
-    defer allocator.free(meta.merges);
+    const context = init(vocab_path, merges_path);
+    const real_context: *EncoderContext = @ptrCast(@alignCast(context));
+    const meta = real_context.meta;
+    defer _ = deinit(context);
 
     std.testing.expect(meta.vocab.len > 0) catch |err| {
         std.debug.print("vocab len was 0, error: {s}\n", .{@errorName(err)});
