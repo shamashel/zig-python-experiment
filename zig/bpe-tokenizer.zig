@@ -160,36 +160,52 @@ export fn deinit(context: BlackMagic) c_int {
     return 0;
 }
 
-// /// Encoder method for the tokenizer.
-// ///
-// /// Returns a slice of tokens
-// pub fn internal_encode(allocator: std.mem.Allocator, text: UTF8EncodedStr, meta: *const EncoderMetadata) !OutTokenIds {}
+/// Encoder method for the tokenizer.
+///
+/// Returns a slice of tokens
+pub fn internal_encode(_: *EncoderContext, _: UTF8EncodedStr) !OutTokenIds {
+    return &[_]TokenId{};
+}
 
-// /// Encode the text based on the initialized BPE tokenizer.
-// /// Wraps the `internal_encode` method with an ABI-friendly interface.
-// ///
-// /// Returns:
-// /// - [>=0]: The number of tokens written (slice from 0 to this number for an accurate list of tokens)
-// /// - [-1]: Generic error, check logs
-// /// - [-2]: Capacity too small. Ensure the output ids array has the same length as the `text_str`.
-// export fn encode(text_str: UTF8EncodedBytesPtr, text_len: c_int, out_ids_ptr: OutTokenIdsPtr, out_capacity: c_int) c_int {
-//     // Don't need to tokenize if there's nothing to tokenize
-//     if (text_len == 0) return 0;
-//     if (text_len < 0 or out_capacity < 0) {
-//         std.debug.print(
-//             "ERROR: Text length or output capacity less than 0. \nText Length: {}\nOutput Capacity: {}\n",
-//             .{ text_len, out_capacity },
-//         );
-//         return -1;
-//     }
-//     if (out_capacity < text_len) {
-//         std.debug.print(
-//             "ERROR: Output capacity should be at least as large as the number of input bytes. \nText Length: {}\nOutput Capacity: {}\n",
-//             .{ text_len, out_capacity },
-//         );
-//         return -2;
-//     }
-// }
+/// Encode the text based on the initialized BPE tokenizer.
+/// Wraps the `internal_encode` method with an ABI-friendly interface.
+///
+/// Returns:
+/// - [>=0]: The number of tokens written (slice from 0 to this number for an accurate list of tokens)
+/// - [-1]: Generic error, check logs
+/// - [-2]: Capacity too small. Ensure the output ids array has the same length as the `text_str`.
+export fn encode(context: BlackMagic, text_str: UTF8EncodedBytesPtr, text_len: c_int, out_ids_ptr: OutTokenIdsPtr, out_capacity: c_int) c_int {
+    const real_context: *EncoderContext = @ptrCast(@alignCast(context));
+
+    // Don't need to tokenize if there's nothing to tokenize
+    if (text_len == 0) return 0;
+    if (text_len < 0 or out_capacity < 0) {
+        std.debug.print(
+            "ERROR: Text length or output capacity less than 0. \nText Length: {}\nOutput Capacity: {}\n",
+            .{ text_len, out_capacity },
+        );
+        return -1;
+    }
+    if (out_capacity < text_len) {
+        std.debug.print(
+            "ERROR: Output capacity should be at least as large as the number of input bytes. \nText Length: {}\nOutput Capacity: {}\n",
+            .{ text_len, out_capacity },
+        );
+        return -2;
+    }
+
+    const tokens = internal_encode(real_context, text_str[0..@intCast(text_len)]) catch |err| {
+        std.debug.print("ERROR: System came down with a bad case of Ligma. The prognosis: {s}\n", .{@errorName(err)});
+        return -1;
+    };
+    if (tokens.len > @as(usize, @intCast(out_capacity))) {
+        std.debug.print("ERROR: How did this happen?\nTokens Length: {}\nOutput Capacity: {}\n", .{ tokens.len, out_capacity });
+        return -2;
+    }
+    const dest = out_ids_ptr[0..tokens.len];
+    @memcpy(dest, tokens);
+    return @intCast(tokens.len);
+}
 
 test "init loads vocab and merges" {
     // Adjust filenames if yours differ
